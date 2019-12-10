@@ -8,3 +8,4 @@ Page 12 of http://www.cs.utexas.edu/users/inderjit/public_papers/HLA_SVD.pdf (ma
 
 Matlab Implementation: https://github.com/zlliang/jacobi-svd/blob/master/jacobi_svd.m
 
+arneish: https://github.com/arneish/CUDA-PCA-jacobi
