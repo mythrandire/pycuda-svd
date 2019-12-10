@@ -6,57 +6,49 @@ Created on Tue Dec  3 14:10:24 2019
 """
 
 import numpy as np
+import random
+from Helper import s_maxind, s_update, s_rotate            
 
-def maxind(A,size,k):
-    m = k + 1
-    for i in range(k+2,size):
-        if(np.abs(A[k,i])>np.abs(A[k,m])):
-            m = i
-    return m
-        
-def update(k,t,e,changed,state):
-    y = e[k]
-    e[k] = y + t
-    if changed[k] and y == e[k]:
-        changed[k] = False
-        state -= 1
-    elif changed[k]==False and y!=e[k]:
-        changed[k] = True
-        state += 1
-    return changed, state
-
-def rotate(k,l,i,j,A,P,c,s):
-    kl = c * A[k,l] - s * A[i,j]
-    ij = s * A[k,l] + c * A[i,j]
-    A[k,l] = kl
-    A[i,j] = ij
-    return A
-            
-def svd_pca_serial(N, P, D, U, sigma, VT, sigmam, sigman, dhat, k, retention):
+def svd_pca_serial(N, P, D):
+                   #, U, sigma, VT, sigmam, sigman, dhat, k, retention):
     MAX_ITER = 1000000
     state = P
     num_iter = 0
-    E = np.ones((P,P), dtype = np.float32)
+    
+    #initializing eigenvector matrix to diag{1xP}
+    E = np.diag(np.ones((P), dtype = np.float32))
+    U = np.empty((P,P), dtype = np.float32)
+    
+    #calculating covariance matrix
     DT = D.T
-    As = np.multiply(D.T,D)
-    ind = np.zeros((P),dtype = np.int32)
-    e = np.zeros((P), dtype = np.float32)
+    As = np.dot(DT,D)
+    
+    #initializing some useful variables
+    ind = np.empty((P),dtype = np.int32)
+    e = np.empty((P), dtype = np.float32)
     changed = np.zeros((P), dtype = np.bool)
+    
+    #setting ind to index of maximum value in each column and setting 
+    #eigenvalues to diagonal elements of covariance matrix
     for i in range(P):
-        ind[i] = maxind(As,P,i)
-        e[i] = As[i,i]
+        ind[i] = s_maxind(As,P,i)
+        e[i] = As[i][i]
         changed[i] = True
     
-    while (state and num_iter<MAX_ITER):
+    #start iteration of jaboi method
+    while (state>=0 and num_iter<MAX_ITER):
         m=0
+        #find index of maximum element in each column
         for i in range(1,P-1):
-            if(np.abs(As[i,ind[i]])>np.abs(As[m,ind[m]])):
+            if(abs(As[i][ind[i]])>abs(As[m][ind[m]])):
                 m = i
+        
+        #calculate sine, cosine values for rotation and tolerance for stopsign
         k = m
         l = ind[k]
-        p = As[k,l]
+        p = As[k][l]
         y = 0.5 * (e[l]-e[k])
-        d = np.abs(y) + np.sqrt(p*p + y*y)
+        d = abs(y) + np.sqrt(p*p + y*y)
         r = np.sqrt(p*p + d*d)
         c = d/r
         s = p/r
@@ -64,46 +56,84 @@ def svd_pca_serial(N, P, D, U, sigma, VT, sigmam, sigman, dhat, k, retention):
         if y<0:
             s = -s
             t = -t
-        As[k,l] = 0.0
-        changed1, state1 = update(k, -t, e, changed, state)
-        changed, state = update(k, t, e, changed1, state1)
+        As[k][l] = 0.0
         
-        for i in range(k):
-            As = rotate(i,k,i,l,As,P,c,s)
-        for i in range(k+1,l):
-            As = rotate(k,i,i,l,As,P,c,s)
-        for i in range(l+1,P):
-            As = rotate(k,i,l,i,As,P,c,s)
+        #update state of eigenvalues if their values have been changed
+        changed1, state1 = s_update(k, -t, e, changed, state)
+        changed, state = s_update(l, t, e, changed1, state1)
+        
+        #rotate covariance matrix on offdiagonal elements to reduce it to 
+        #eigenvalue matrix
+        for i in range(0,k):
+            As = s_rotate(i,k,i,l,As,c,s)
+        for j in range(k+1,l):
+            As = s_rotate(k,j,j,l,As,c,s)
+        for z in range(l+1,P):
+            As = s_rotate(k,z,l,z,As,c,s)
         
         #rotate eigenvectors
-        for i in range(P):
-            eik = c * E[i,k] - s * E[i,l]
-            eil = s * E[i,k] + c * E[i,l]
-            E[i,k] = eik
-            E[i,l] = eil
+        for i in range(0,P):
+            ik = c * E[i][k] - s * E[i][l]
+            il = s * E[i][k] + c * E[i][l]
+            E[i][k] = ik
+            E[i][l] = il
         
-        ind[k] = maxind(As,P,k)
-        ind[l] = maxind(As,P,l)
+        ind[k] = s_maxind(As,P,k)
+        ind[l] = s_maxind(As,P,l)
         
         num_iter += 1
         
     sum_eigenvalues = 0.0
+    sigma = np.empty((P),dtype = np.float32)
+    
+    #sort eigenvalues in descending order along with corresponding indices
+    e = np.sort(e)
+    newind = np.argsort(e)
+    e = np.flip(e)
+    newind = np.flip(newind)
+    
+    #calculate singular values of D
     for i in range(P):
         sigma[i] = np.sqrt(e[i])
         sum_eigenvalues += e[i]
-        
     
+    #calculate eigenvector U of D
+    for i in range(P):
+        for j in range(P):
+            U[i][j] = E[i][newind[j]]
     
-    return sigma
+    #calculating eigenvector VT of D        
+    inv_sigma = np.zeros((N,P),dtype = np.float32)
+    for i in range(P):
+        inv_sigma[i][i] = 1.0/sigma[i]
+    UT = U.T
+    prod = np.dot(inv_sigma,UT)
+    VT = np.dot(prod, DT)
+    
+    #return calculated eigenvalue and eigenvector matrices
+    return sigma, U, VT
 
 if __name__ =='__main__':
-    A = np.random.randint(0,9,(3,3))
-    A1 = np.dot(A,A.T)
-    sigma = np.zeros((3),dtype = np.float32)
-    s = svd_pca_serial(A1.shape[0],A1.shape[1],A1,None,sigma,None,None,None,None,None,None)
-    print("S",s)
+    random.seed(1)
+    A = np.random.randint(0,9,(3,3)).astype(np.float32)
+    #initialize A
+    #A = np.array([[4,0],[3,-5]])
+    #A = A.astype(np.float32)
+    
+    #calculate covaiance matrix of A for numpy verification
+    A1 = np.dot(A.T,A)
+    
+    #serial jacobi method for SVD
+    s, u, vt = svd_pca_serial(A.shape[0],A.shape[1],A)
+    
+    #numpy verification
     s1,v1 = np.linalg.eig(A1)
-    print("S1",s1)
+    
+    #print results
+    print("Serial Eigenvalues: \n", s)
+    print("Numpy Eigenvalues: \n",np.sqrt(s1))
+    print("Serial Eigenvectors: \n", u)
+    print("Numpy Eigenvectors: \n", v1)
     
     
             
