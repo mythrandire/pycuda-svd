@@ -106,8 +106,8 @@ class gpuMul:
             mod = compiler.SourceModule(self.mul_kernel_code)
             dev_mul = mod.get_function("kernel_MatMul")
 
-            grid_x = ceil(cB*1.0/32)
-            grid_y = ceil(rA*1.0/32)
+            grid_x = np.ceil(cB*1.0/32)
+            grid_y = np.ceil(rA*1.0/32)
 
             dev_mul(
                 self.A_gpu, rA, cA,
@@ -395,14 +395,13 @@ def cudaSVD(N, P, D):
     """
     ###########################################################################
     # STREAM PARALLELIZATION
-    stream1 = cuda.Stream()
-    stream2 = cuda.Stream()
 
-    iterBlock_device = gpuarray.empty(((P-1)*(P/2)*2), np.int32)
+    iterBlock_dim = (P - 1)*P
+    iterBlock_device = gpuarray.empty((iterBlock_dim), np.int32)
     mod = compiler.SourceModule(chess_params_kernel_code)
     dev_chess = mod.get_function("kernel_compute_all_chess_params")
 
-    dev_chess(P, iterBlock_device, block = (P-1, P/2, 1), stream = stream1)
+    dev_chess(P, iterBlock_device, block = (int(np.ceil(P/2)), int(np.ceil(P/2)), 1), grid = (P-1, P-1))
     iterBlock = iterBlock_device.get()
 
     # cudaAsynccopy something
@@ -486,6 +485,7 @@ if __name__ =='__main__':
 
     #serial jacobi method for SVD
     s, u, vt = cudaSVD(A.shape[0],A.shape[1],A)
+    print(A.shape[1])
 
     #numpy verification
     s1,v1 = np.linalg.eig(A1)
