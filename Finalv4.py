@@ -58,7 +58,7 @@ class cuda_Transpose:
             np.int32(self.x.shape[0]),
             np.int32(self.x.shape[1]),
             block = (32, 32, 1),
-            grid = (int(np.ceil(np.float32(M)/np.float32(32))), int(np.ceil(np.float32(N)/np.float32(32))), 1)
+            grid = (np.int(np.ceil(np.float32(M)/np.float32(32))), np.int(np.ceil(np.float32(N)/np.float32(32))), 1)
         )
 
         return self.y_gpu.get()
@@ -68,14 +68,14 @@ class gpuMul:
     def __init__(self):
 
         self.mul_kernel_code = """
-            #define BLOCK_SIZE 32
-            __global__ void kernel_MatMul(double *A, int rA, int cA, double *B, int rB, int cB, double *C) {
+            #define BLOCK_SIZE 16
+            __global__ void kernel_MatMul(float *A, int rA, int cA, float *B, int rB, int cB, float *C) {
                 int bIDx = blockIdx.x, bIDy = blockIdx.y, tIDx = threadIdx.x, tIDy = threadIdx.y;
                 int row_ = bIDy * BLOCK_SIZE + tIDy;
                 int col_ = bIDx * BLOCK_SIZE + tIDx;
-                __shared__ double A_sub[BLOCK_SIZE][BLOCK_SIZE];
-                __shared__ double B_sub[BLOCK_SIZE][BLOCK_SIZE];
-                double C_sub = 0.0;
+                __shared__ float A_sub[BLOCK_SIZE][BLOCK_SIZE];
+                __shared__ float B_sub[BLOCK_SIZE][BLOCK_SIZE];
+                float C_sub = 0.0;
                 for (int m = 0; m < (BLOCK_SIZE + cA - 1) / BLOCK_SIZE; m++) {
                     if (m * BLOCK_SIZE + tIDx < cA && row_ < rA) {
                         A_sub[tIDy][tIDx] = A[row_ * cA + m * BLOCK_SIZE + tIDx];
@@ -111,14 +111,14 @@ class gpuMul:
             mod = compiler.SourceModule(self.mul_kernel_code)
             dev_mul = mod.get_function("kernel_MatMul")
 
-            grid_x = int(np.ceil(cB*1.0/32))
-            grid_y = int(np.ceil(rA*1.0/32))
+            grid_x = np.int(np.ceil(cB*1.0/16))
+            grid_y = np.int(np.ceil(rA*1.0/16))
 
             dev_mul(
                 self.A_gpu, rA, cA,
                 self.B_gpu, rB, cA,
                 self.C_gpu,
-                block = (32, 32, 1),
+                block = (16, 16, 1),
                 grid = (grid_x, grid_y, 1)
             )
 
@@ -129,16 +129,19 @@ class computeParams:
     def __init__(self):
 
         self.compute_params_kernel_code = """
-            __global__ void kernel_compute_params(double *device_A, int P, int iter, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
+
+            __global__ void kernel_compute_params(float *device_A, int P, int iter, float *device_sine, float *device_cosine, int *device_IterBlockToElem) {
                 /*1 Block, P/2 threads: threadID t handles params for its alloted pair (for a particular device_iter)*/
                 # define EPSILON 1e-4
                 int localID = threadIdx.x;
                 int k, l;
-                double elem, y, d, r, c, s; //,t
+                float elem, y, d, r, c, s; //,t
                 k = device_IterBlockToElem[iter*P+localID*2]; //row
                 l = device_IterBlockToElem[iter*P+localID*2+1]; //col
                 elem = device_A[k * P + l];
+                __syncthreads();
                 y = (device_A[l * P + l] - device_A[k * P + k]) * 0.5;
+                __syncthreads();
                 d = fabs(y) + sqrt(elem * elem + y * y);
                 r = sqrt(elem * elem + d * d);
                 if (r < EPSILON) {
@@ -149,48 +152,51 @@ class computeParams:
                     c = d / r;
                     s = y / fabs(y) * elem / r; //t=y/fabs(y)*p*p/d;
                 }
+                __syncthreads();
+                if (k<P && l<P){
                 device_cosine[k * P + l] = c;
                 device_sine[k * P + l] = s;
+                }
             }
         """
 
-    def compute_params(self, A, P, iter, iterblock):
+    def compute_params(self, A, P, itr, iterblock):
         self.A_gpu = gpuarray.to_gpu(A)
-        self.dev_sin = gpuarray.empty((P, P), np.double)
-        self.dev_cos = gpuarray.empty((P, P), np.double)
         self.iterBlock_device = gpuarray.to_gpu(iterblock)
+        self.dev_sin = gpuarray.empty((P, P), np.float32)
+        self.dev_cos = gpuarray.empty((P, P), np.float32)
         # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
         if (P % 2 == 0):
-            grid_size = int(np.ceil(P / 2))
+            grid_size = np.int(P / 2)
         else:
-            grid_size = int(np.ceil(P / 2) + 1)
-
+            grid_size = np.int(P / 2 + 1)
         mod = compiler.SourceModule(self.compute_params_kernel_code)
         compute_params_code = mod.get_function("kernel_compute_params")
         compute_params_code(
-            self.A_gpu, P, iter,
+            self.A_gpu, P, itr,
             self.dev_sin,
             self.dev_cos,
             self.iterBlock_device,
             block = (grid_size, grid_size, 1))
         # block size?
+        dc = self.dev_cos.get()
+        ds = self.dev_sin.get()
+        self.A_gpu.get()
+        self.iterBlock_device.get()
         
-        return self.dev_sin.get(), self.dev_cos.get()
-
-
-
+        return ds, dc
 
 class dimUpdate:
 
     def __init__(self,P):
 
         self.row_update_kernel_code = """
-            __global__ void kernel_row_update(int iter, double *device_A, double *device_X, int P, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
+            __global__ void kernel_row_update(int iter, float *device_A, float *device_X, int P, float *device_sine, float *device_cosine, int *device_IterBlockToElem) {
                 int localID = threadIdx.x;
                 int blockID = blockIdx.x;
                 /*Based on blockID [total blocks=P/2], compute the corresponding two rows: p,q for device_iter*/
                 __shared__ int row_pair[2];
-                __shared__ double params[2]; //[sin_, cos_]
+                __shared__ float params[2]; //[sin_, cos_]
                 if (localID == 0)            //to minimize global memory access latency at the cost of divergence
                 {
                     row_pair[0] = device_IterBlockToElem[iter*P+blockID * 2];
@@ -201,7 +207,7 @@ class dimUpdate:
                 __syncthreads(); //all "P" threads in the block are synchronized and have access to row_pair(k,l) and params
                 //CHECKPOINT: Can you reduce shared-memory bank conflicts here?
                 int k = row_pair[0], l = row_pair[1];
-                double sin_ = params[0], cos_ = params[1], elem_k=device_A[k*P+localID], elem_l=device_A[l * P + localID];
+                float sin_ = params[0], cos_ = params[1], elem_k=device_A[k*P+localID], elem_l=device_A[l * P + localID];
                 /*Concurrent modifications to all row pairs(k,l) [different blocks]*/
                 /*Concurrent modifications to different-column elements of a row pair: ["P" threads of the block]*/
                 /*X is col-major, i.e. write in X-transpose*/
@@ -211,12 +217,12 @@ class dimUpdate:
         """
 
         self.col_update_kernel_code = """
-            __global__ void kernel_col_update(int iter, double *device_A, double *device_X, int P, double *device_eigenvectors, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
+            __global__ void kernel_col_update(int iter, float *device_A, float *device_X, int P, float *device_eigenvectors, float *device_sine, float *device_cosine, int *device_IterBlockToElem) {
                 int localID = threadIdx.x;
                 int blockID = blockIdx.x;
                 /*Based on blockID [total blocks=P/2], compute the corresponding two cols: p,q for device_iter*/
                 __shared__ int col_pair[2];
-                __shared__ double params[2]; //[sin_, cos_]
+                __shared__ float params[2]; //[sin_, cos_]
                 if (localID == 0)            //to minimize global memory access latency at the cost of divergence
                 {
                     col_pair[0] = device_IterBlockToElem[iter*P+blockID * 2];
@@ -227,10 +233,10 @@ class dimUpdate:
                 __syncthreads(); //all "P" threads in the block are synchronized and have access to row_pair(k,l) and params
                 //CHECKPOINT: Can you reduce shared-memory bank conflicts here? Is this better than computing pair(p,q) all over again
                 int k = col_pair[0], l = col_pair[1];
-                double sin_ = params[0], cos_ = params[1];
+                float sin_ = params[0], cos_ = params[1];
                 /*Concurrent modifications to all row pairs(k,l) [different blocks]*/
                 /*Concurrent modifications to different-column elements of a row pair: ["P" threads of the block]*/
-                double new_eigen_k, new_eigen_l;
+                float new_eigen_k, new_eigen_l;
                 /* col-wise access (inefficient):*/
                 //device_A[localID * P + k] = device_X[k * P + localID] * cos_ - device_X[l * P + localID] * sin_;
                 //device_A[localID * P + l] = device_X[k * P + localID] * sin_ + device_X[l * P + localID] * cos_;
@@ -241,21 +247,25 @@ class dimUpdate:
                 /*row-wise access (efficient):*/
                 int kp = k*P + localID, lp = l *P+localID;
                 device_A[kp] = device_X[kp] * cos_ - device_X[lp] * sin_;
+                __syncthreads();
                 device_A[lp] = device_X[kp] * sin_ + device_X[lp] * cos_;
+                __syncthreads();
                 new_eigen_k = device_eigenvectors[kp]*cos_ - device_eigenvectors[lp]*sin_;
+                __syncthreads();
                 new_eigen_l = device_eigenvectors[kp]*sin_ + device_eigenvectors[lp]*cos_;
+                __syncthreads();
                 device_eigenvectors[kp] = new_eigen_k;
                 device_eigenvectors[lp] = new_eigen_l;
+                __syncthreads();
             }
         """
     
-        self.X_device = gpuarray.empty((P, P), np.double)
-        E = np.diag(np.ones((P), dtype = np.double))
+        E = np.diag(np.ones((P), dtype = np.float32))
         self.device_eigenvectors = gpuarray.to_gpu(E)
 
-    def row_update(self, itr, A, x_device, P, sin, cos, iterBlock):
+    def row_update(self, itr, A, X_device, P, sin, cos, iterBlock):
         self.A_device = gpuarray.to_gpu(A)
-        self.X_device = gpuarray.to_gpu(x_device)
+        self.X_device = gpuarray.to_gpu(X_device)
         self.dev_sin = gpuarray.to_gpu(sin)
         self.dev_cos = gpuarray.to_gpu(cos)
         self.iterBlock_device = gpuarray.to_gpu(iterBlock)
@@ -275,7 +285,6 @@ class dimUpdate:
             block = (np.int(P), np.int(P), 1),
             grid = (np.int(grid_size), np.int(grid_size),1)
         )
-
         return self.X_device.get()
 
     def col_update(self, itr, A, X_device, P, sin, cos, iterBlock):
@@ -357,9 +366,12 @@ def cudaSVD(N, P, D):
     iterBlock = iterBlock_device.get()
     # cudaAsynccopy something
     D_T = t.transpose_parallel(D)
+    print("D",D)
+    print("DT",D_T)
     ###########################################################################
 
     A = g.MatMul(D_T, np.int32(P), np.int32(N), D, np.int32(N), np.int32(P))
+    print(A)
     eigenvectors = np.ones((P, P), np.float32)
     counter = 0
 
@@ -369,24 +381,25 @@ def cudaSVD(N, P, D):
     MAX_BLOCK_SIZE = 1024
     MAX_SWEEPS = 30
     MAX_ITER = 10000000
-    MULTIPLY_BLOCK_SIZE = 64
+    MULTIPLY_BLOCK_SIZE = 16
 
     itr = 0
     cP = computeParams()
     dU = dimUpdate(P)
-    X = np.empty((P,P), dtype = np.double)
+    X = np.zeros((P,P), dtype = np.float32)
     while(itr < P - 1):
         # Compute rotation parameters: sine and cosine
         # for all (p, q), q>p
         sin, cos = cP.compute_params(A, np.int32(P), np.int32(itr), iterBlock)
-
+        print(sin,cos)
         # row update
-        X = dU.row_update(np.int32(itr), np.double(A), np.double(X),
-                          np.int32(P), np.double(sin), np.double(cos), iterBlock)
-
+        X = dU.row_update(np.int32(itr), np.float32(A), np.float32(X),
+                          np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
+        print("X",X)
         # col update
-        eigenvectors = dU.col_update(np.int32(itr), np.double(A), np.double(X),
-                                     np.int32(P), np.double(sin), np.double(cos), iterBlock)
+        eigenvectors = dU.col_update(np.int32(itr), np.float32(A), np.float32(X),
+                                     np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
+        print("Eigenvectors",eigenvectors)
         itr += 1
         print(itr)
     eigenvectors_T = t.transpose_parallel(eigenvectors)
