@@ -64,7 +64,6 @@ class gpuMul:
         self.mul_kernel_code = """
             __global__ void kernel_MatMul(double *A, int rA, int cA, double *B, int rB, int cB, double *C) {
 
-                assert(cA == rB);
                 int bIDx = blockIdx.x, bIDy = blockIdx.y, tIDx = threadIdx.x, tIDy = threadIdx.y;
                 int row_ = bIDy * BLOCK_SIZE + tIDy;
                 int col_ = bIDx * BLOCK_SIZE + tIDx;
@@ -119,52 +118,6 @@ class gpuMul:
 
             return self.C_gpu.get()
 
-class chessParams:
-    def __init__(self):
-
-
-        self.chess_params_kernel_code = """
-            __device__ void chess_tourney_params(int P, int *row_pair, int iter) {
-                //NOTE: here, row_pair is thread-local
-                int localID = threadIdx.x;
-                int index1, index2;
-                index1 = (localID + iter) % (P - 1);
-                if (localID != 0) {
-                    index2 = (P - localID + iter - 1) % (P - 1);
-                }
-                else {
-                    index2 = P - 1;
-                }
-                row_pair[0] = min(index1, index2);
-                row_pair[1] = max(index1, index2);
-            }
-
-        __global__ void kernel_compute_all_chess_params(int P, int *device_IterBlockToElem) {
-            int blockID = blockIdx.x;
-            //each ONE of the P-1 blocks is responsible for computing chess-tourney parameters for ONE of the P-1 iterations
-            int index = blockID*P + threadIdx.x*2;
-            assert(threadIdx.x < P/2);
-            int *row_pair = (int *) malloc(sizeof(int)*2);
-            chess_tourney_params(P, row_pair, blockID);
-            device_IterBlockToElem[index] = row_pair[0]; //|=(P-1)X(P/2*2)
-            device_IterBlockToElem[index+1] = row_pair[1];
-            free(row_pair);
-        }
-        """
-
-        def compute_all_chess_params(self, P, row_pair, iterBlock):
-            self.P = P
-            self.iterBlock_device = gpuarray.empty(((P-1), (P/2), 2), np.int32)
-            mod = compiler.SourceModule(self.chess_params_kernel_code)
-            dev_chess = mod.get_function("kernel_compute_all_chess_params")
-
-            dev_chess(
-                self.P, self.iterBlock,
-                block = (P-1, P/2, 1)
-            )
-
-        return self.iterBlock_device.get()
-
 
 class computeParams:
     def __init__(self):
@@ -173,7 +126,6 @@ class computeParams:
             __global__ void kernel_compute_params(double *device_A, int P, int iter, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
                 /*1 Block, P/2 threads: threadID t handles params for its alloted pair (for a particular device_iter)*/
                 int localID = threadIdx.x;
-                assert(localID < P / 2);
                 int k, l;
                 double elem, y, d, r, c, s; //,t
                 k = device_IterBlockToElem[iter*P+localID*2]; //row
@@ -385,7 +337,6 @@ def cudaSVD(N, P, D):
         int blockID = blockIdx.x;
         //each ONE of the P-1 blocks is responsible for computing chess-tourney parameters for ONE of the P-1 iterations
         int index = blockID*P + threadIdx.x*2;
-        assert(threadIdx.x < P/2);
         int *row_pair = (int *) malloc(sizeof(int)*2);
         chess_tourney_params(P, row_pair, blockID);
         device_IterBlockToElem[index] = row_pair[0]; //|=(P-1)X(P/2*2)
@@ -396,8 +347,7 @@ def cudaSVD(N, P, D):
     ###########################################################################
     # STREAM PARALLELIZATION
 
-    iterBlock_dim = (P - 1)*P
-    iterBlock_device = gpuarray.empty((iterBlock_dim), np.int32)
+    iterBlock_device = gpuarray.empty(((P-1), int(np.ceil(P/2)), 2), np.int32)
     mod = compiler.SourceModule(chess_params_kernel_code)
     dev_chess = mod.get_function("kernel_compute_all_chess_params")
 
