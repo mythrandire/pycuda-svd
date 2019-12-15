@@ -26,7 +26,6 @@ class cuda_Transpose:
         # Kernal code:
         self.transpose_kernel_code = """
         __global__ void parTranspose(float *idata, float *odata, int cols, int rows) {
-
             int ix = blockIdx.x * blockDim.x + threadIdx.x;
             int iy = blockIdx.y * blockDim.y + threadIdx.y;
             if ((ix < cols) && (iy < rows)) {
@@ -62,8 +61,8 @@ class gpuMul:
     def __init__(self):
 
         self.mul_kernel_code = """
+            #define BLOCK_SIZE 32
             __global__ void kernel_MatMul(double *A, int rA, int cA, double *B, int rB, int cB, double *C) {
-
                 int bIDx = blockIdx.x, bIDy = blockIdx.y, tIDx = threadIdx.x, tIDy = threadIdx.y;
                 int row_ = bIDy * BLOCK_SIZE + tIDy;
                 int col_ = bIDx * BLOCK_SIZE + tIDx;
@@ -96,17 +95,17 @@ class gpuMul:
             }
         """
 
-        def MatMul(self, A, rA, cA, B, rB, cB):
+    def MatMul(self, A, rA, cA, B, rB, cB):
 
-            self.C_gpu = gpuarray.empty((A.shape[0], B.shape[1]), astype.float32)
+            self.C_gpu = gpuarray.empty((A.shape[0], B.shape[1]), dtype = np.float32)
             self.A_gpu = gpuarray.to_gpu(A)
             self.B_gpu = gpuarray.to_gpu(B)
 
             mod = compiler.SourceModule(self.mul_kernel_code)
             dev_mul = mod.get_function("kernel_MatMul")
 
-            grid_x = np.ceil(cB*1.0/32)
-            grid_y = np.ceil(rA*1.0/32)
+            grid_x = int(np.ceil(cB*1.0/32))
+            grid_y = int(np.ceil(rA*1.0/32))
 
             dev_mul(
                 self.A_gpu, rA, cA,
@@ -118,7 +117,7 @@ class gpuMul:
 
             return self.C_gpu.get()
 
-
+# computeParams.compute_params
 class computeParams:
     def __init__(self):
 
@@ -147,29 +146,29 @@ class computeParams:
             }
         """
 
-        def compute_params(self, A, P, iter, iterBlock):
-            self.A_gpu = gpuarray.to_gpu(A)
-            self.dev_sin = gpuarray.empty((P, P))
-            self.dev_cos = gpuarray.empty((P, P))
-            self.iterBlock_device = gpuarray.to_gpu(iterBlock)
-            # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
+    def compute_params(self, A, P, iter, iterblock):
+        self.A_gpu = gpuarray.to_gpu(A)
+        self.dev_sin = gpuarray.empty((P, P))
+        self.dev_cos = gpuarray.empty((P, P))
+        self.iterBlock_device = gpuarray.to_gpu(iterblock)
 
-            mod = compiler.SourceModule(self.compute_params_kernel_code)
-            compute_params_code = mod.get_function(kernel_compute_params)
+        # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
+        mod = compiler.SourceModule(self.compute_params_kernel_code)
+        compute_params_code = mod.get_function(kernel_compute_params)
 
-            compute_params_code(
-                self.A_gpu, P, iter,
-                self.dev_sin,
-                self.dev_cos,
-                self.iterBlock_device,
-                block = (som_size, 1, 1)
-            )
+        compute_params_code(
+            self.A_gpu, P, iter,
+            self.dev_sin,
+            self.dev_cos,
+            self.iterBlock_device,
+            block = (32, 32, 1)
+        )
+        print('here!')
 
-            return self.dev_sin.get(), self.dev_cos.get()
+        return self.dev_sin.get(), self.dev_cos.get()
 
-            """
-            VERIFY THE ABOVE PLEASE
-            """
+
+
 
 class dimUpdate:
 
@@ -177,14 +176,11 @@ class dimUpdate:
 
         self.row_update_kernel_code = """
             __global__ void kernel_row_update(int iter, double *device_A, double *device_X, int P, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
-
                 int localID = threadIdx.x;
                 int blockID = blockIdx.x;
-
                 /*Based on blockID [total blocks=P/2], compute the corresponding two rows: p,q for device_iter*/
                 __shared__ int row_pair[2];
                 __shared__ double params[2]; //[sin_, cos_]
-
                 if (localID == 0)            //to minimize global memory access latency at the cost of divergence
                 {
                     row_pair[0] = device_IterBlockToElem[iter*P+blockID * 2];
@@ -193,14 +189,11 @@ class dimUpdate:
                     params[1] = device_cosine[row_pair[0] * P + row_pair[1]];
                 }
                 __syncthreads(); //all "P" threads in the block are synchronized and have access to row_pair(k,l) and params
-
                 //CHECKPOINT: Can you reduce shared-memory bank conflicts here?
                 int k = row_pair[0], l = row_pair[1];
                 double sin_ = params[0], cos_ = params[1], elem_k=device_A[k*P+localID], elem_l=device_A[l * P + localID];
-
                 /*Concurrent modifications to all row pairs(k,l) [different blocks]*/
                 /*Concurrent modifications to different-column elements of a row pair: ["P" threads of the block]*/
-
                 /*X is col-major, i.e. write in X-transpose*/
                 device_X[localID * P + k] = elem_k * cos_ - elem_l * sin_;
                 device_X[localID * P + l] = elem_k * sin_ + elem_l * cos_;
@@ -209,10 +202,8 @@ class dimUpdate:
 
         self.col_update_kernel_code = """
             __global__ void kernel_col_update(int iter, double *device_A, double *device_X, int P, double *device_eigenvectors, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
-
                 int localID = threadIdx.x;
                 int blockID = blockIdx.x;
-
                 /*Based on blockID [total blocks=P/2], compute the corresponding two cols: p,q for device_iter*/
                 __shared__ int col_pair[2];
                 __shared__ double params[2]; //[sin_, cos_]
@@ -224,15 +215,12 @@ class dimUpdate:
                     params[1] = device_cosine[col_pair[0] * P + col_pair[1]];
                 }
                 __syncthreads(); //all "P" threads in the block are synchronized and have access to row_pair(k,l) and params
-
                 //CHECKPOINT: Can you reduce shared-memory bank conflicts here? Is this better than computing pair(p,q) all over again
                 int k = col_pair[0], l = col_pair[1];
                 double sin_ = params[0], cos_ = params[1];
-
                 /*Concurrent modifications to all row pairs(k,l) [different blocks]*/
                 /*Concurrent modifications to different-column elements of a row pair: ["P" threads of the block]*/
                 double new_eigen_k, new_eigen_l;
-
                 /* col-wise access (inefficient):*/
                 //device_A[localID * P + k] = device_X[k * P + localID] * cos_ - device_X[l * P + localID] * sin_;
                 //device_A[localID * P + l] = device_X[k * P + localID] * sin_ + device_X[l * P + localID] * cos_;
@@ -240,7 +228,6 @@ class dimUpdate:
                 //new_eigen_l = device_eigenvectors[localID * P+k]*sin_ + device_eigenvectors[localID*P+l]*cos_;
                 //device_eigenvectors[localID * P + k] = new_eigen_k;
                 //device_eigenvectors[localID * P+l] = new_eigen_l;
-
                 /*row-wise access (efficient):*/
                 int kp = k*P + localID, lp = l *P+localID;
                 device_A[kp] = device_X[kp] * cos_ - device_X[lp] * sin_;
@@ -252,58 +239,58 @@ class dimUpdate:
             }
         """
 
-        def row_update(self, iter, A, P, sin, cos, iterBlock):
-            self.A_device = gpuarray.to_gpu(A)
-            self.dev_sin = gpuarray.to_gpu(sin)
-            self.dev_cos = gpuarray.to_gpu(cos)
-            self.iterBlock_device = gpuarray.to_gpu(iterBlock)
-            self.X_device = gpuarray.empty((P, P))
+    def row_update(self, iter, A, P, sin, cos, iterBlock):
+        self.A_device = gpuarray.to_gpu(A)
+        self.dev_sin = gpuarray.to_gpu(sin)
+        self.dev_cos = gpuarray.to_gpu(cos)
+        self.iterBlock_device = gpuarray.to_gpu(iterBlock)
+        self.X_device = gpuarray.empty((P, P))
 
-            mod1 = compiler.SourceModule(row_update_kernel_code)
-            row_update_code = mod1.get_function(kernel_row_update)
-            if (P % 2 == 0):
-                grid_size = P / 2
-            else:
-                grid_size = P / 2 + 1
+        mod1 = compiler.SourceModule(row_update_kernel_code)
+        row_update_code = mod1.get_function(kernel_row_update)
+        if (P % 2 == 0):
+            grid_size = P / 2
+        else:
+            grid_size = P / 2 + 1
 
-            row_update_code(
-                iter, self.A_device,
-                self.X_device, P,
-                self.dev_sin, self.dev_cos,
-                self.iterBlock_device,
-                block = (P, P, 1),
-                grid = (grid_size, grid_size)
-            )
+        row_update_code(
+            iter, self.A_device,
+            self.X_device, P,
+            self.dev_sin, self.dev_cos,
+            self.iterBlock_device,
+            block = (P, P, 1),
+            grid = (grid_size, grid_size)
+        )
 
-            return self.X_device.get()
+        return self.X_device.get()
 
-        def col_update(self, iter, A, X, P, sin, cos, iterBlock):
-            self.A_device = gpuarray.to_gpu(A)
-            self.dev_sin = gpuarray.to_gpu(sin)
-            self.dev_cos = gpuarray.to_gpu(cos)
-            self.iterBlock_device = gpuarray.to_gpu(iterBlock)
-            self.X_device = gpuarray.to_gpu(X)
-            self.device_eigenvectors = gpuarray.empty((P, P))
+    def col_update(self, iter, A, X, P, sin, cos, iterBlock):
+        self.A_device = gpuarray.to_gpu(A)
+        self.dev_sin = gpuarray.to_gpu(sin)
+        self.dev_cos = gpuarray.to_gpu(cos)
+        self.iterBlock_device = gpuarray.to_gpu(iterBlock)
+        self.X_device = gpuarray.to_gpu(X)
+        self.device_eigenvectors = gpuarray.empty((P, P))
 
-            if (P % 2 == 0):
-                grid_size = P / 2
-            else:
-                grid_size = P / 2 + 1
+        if (P % 2 == 0):
+            grid_size = P / 2
+        else:
+            grid_size = P / 2 + 1
 
-            mod2 = compiler.SourceModule(col_update_kernel_code)
-            col_update_code = mod2.get_function(kernel_col_update)
+        mod2 = compiler.SourceModule(col_update_kernel_code)
+        col_update_code = mod2.get_function(kernel_col_update)
 
-            col_update_code(
-                iter, self.A_device,
-                self.X_device, P,
-                self.device_eigenvectors,
-                self.dev_sin, self.device_cos,
-                self.iterBlock_device,
-                block = (P, P, 1),
-                grid = (grid_size, grid_size)
-            )
+        col_update_code(
+            iter, self.A_device,
+            self.X_device, P,
+            self.device_eigenvectors,
+            self.dev_sin, self.device_cos,
+            self.iterBlock_device,
+            block = (P, P, 1),
+            grid = (grid_size, grid_size)
+        )
 
-            return self.device_eigenvectors.get()
+        return self.device_eigenvectors.get()
 
 """
 ###############################################################################
@@ -332,7 +319,6 @@ def cudaSVD(N, P, D):
             row_pair[0] = min(index1, index2);
             row_pair[1] = max(index1, index2);
         }
-
     __global__ void kernel_compute_all_chess_params(int P, int *device_IterBlockToElem) {
         int blockID = blockIdx.x;
         //each ONE of the P-1 blocks is responsible for computing chess-tourney parameters for ONE of the P-1 iterations
@@ -346,19 +332,22 @@ def cudaSVD(N, P, D):
     """
     ###########################################################################
     # STREAM PARALLELIZATION
+    t = cuda_Transpose()
+    g = gpuMul()
 
-    iterBlock_device = gpuarray.empty(((P-1), int(np.ceil(P/2)), 2), np.int32)
+    iterBlock_device = gpuarray.empty(((P-1), np.int(np.ceil(P/2)), 2), np.int32)
     mod = compiler.SourceModule(chess_params_kernel_code)
     dev_chess = mod.get_function("kernel_compute_all_chess_params")
 
-    dev_chess(P, iterBlock_device, block = (int(np.ceil(P/2)), int(np.ceil(P/2)), 1), grid = (P-1, P-1))
+    dev_chess(np.int32(P), iterBlock_device, block = (np.int(P-1), np.int(np.ceil(P/2)), 1),
+              grid = (np.int(P-1), np.int(P-1),1))
     iterBlock = iterBlock_device.get()
 
     # cudaAsynccopy something
-    D_T = cuda_Transpose.transpose_parallel(D)
+    D_T = t.transpose_parallel(D)
     ###########################################################################
 
-    A = gpuMul.MatMul(D_T, P, N, D, N, P)
+    A = g.MatMul(D_T, np.int32(P), np.int32(N), D, np.int32(N), np.int32(P))
     eigenvectors = np.ones((P, P), np.float32)
     iter = 0
     counter = 0
@@ -375,16 +364,17 @@ def cudaSVD(N, P, D):
     while(iter < P - 1):
         # Compute rotation parameters: sine and cosine
         # for all (p, q), q>p
-        sin, cos = compute_params(A, P, iter, iterBlock)
+        print('here!')
+        sin, cos = computeParams.compute_params(A, P, iter, iterBlock)
 
         # row update
-        X = row_update(iter, A, P, sin, cos, iterBlock)
+        X = dimUpdate.row_update(iter, A, P, sin, cos, iterBlock)
 
         # col update
-        eigenvectors = col_update(iter, A, X, P, sin, cos, iterBlock)
+        eigenvectors = dimUpdate.col_update(iter, A, X, P, sin, cos, iterBlock)
         iter += 1
 
-    eigenvectors_T = cuda_Transpose.transpose_parallel(eigenvectors)
+    eigenvectors_T = t.transpose_parallel(eigenvectors)
 
     eigenvalues = np.ones(P)
     e_indices = np.ones(P)
@@ -416,9 +406,9 @@ def cudaSVD(N, P, D):
     for i in range(P):
         inv_SIGMA[i][i] = 1.0 / SIGMA[i]
 
-    U_T = cuda_Transpose.transpose_parallel(U)
-    prod = gpuMul.MatMul(inv_SIGMA, N, P, U_T, P, P)
-    V_T = gpuMul.MatMul(prod, N, P, D_T, P, N)
+    U_T = t.transpose_parallel(U)
+    prod = g.MatMul(inv_SIGMA, N, P, U_T, P, P)
+    V_T = g.MatMul(prod, N, P, D_T, P, N)
 
     return SIGMA, U, V_T
 
