@@ -152,19 +152,22 @@ class computeParams:
         self.dev_sin = gpuarray.empty((P, P), np.float32)
         self.dev_cos = gpuarray.empty((P, P), np.float32)
         self.iterBlock_device = gpuarray.to_gpu(iterblock)
-
         # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
-        mod = compiler.SourceModule(self.compute_params_kernel_code)
-        compute_params_code = mod.get_function(kernel_compute_params)
+        if (P % 2 == 0):
+            grid_size = int(np.ceil(P / 2))
+        else:
+            grid_size = int(np.ceil(P / 2) + 1)
 
+        mod = compiler.SourceModule(self.compute_params_kernel_code)
+        compute_params_code = mod.get_function("kernel_compute_params")
         compute_params_code(
             self.A_gpu, P, iter,
             self.dev_sin,
             self.dev_cos,
             self.iterBlock_device,
-            block = (32, 32, 1)
+            block = (grid_size, grid_size, 1)
         )
-        print('here!')
+        # block size?
 
         return self.dev_sin.get(), self.dev_cos.get()
 
@@ -245,10 +248,10 @@ class dimUpdate:
         self.dev_sin = gpuarray.to_gpu(sin)
         self.dev_cos = gpuarray.to_gpu(cos)
         self.iterBlock_device = gpuarray.to_gpu(iterBlock)
-        self.X_device = gpuarray.empty((P, P))
+        self.X_device = gpuarray.empty((P, P), np.float32)
 
-        mod1 = compiler.SourceModule(row_update_kernel_code)
-        row_update_code = mod1.get_function(kernel_row_update)
+        mod1 = compiler.SourceModule(self.row_update_kernel_code)
+        row_update_code = mod1.get_function("kernel_row_update")
         if (P % 2 == 0):
             grid_size = P / 2
         else:
@@ -278,8 +281,8 @@ class dimUpdate:
         else:
             grid_size = P / 2 + 1
 
-        mod2 = compiler.SourceModule(col_update_kernel_code)
-        col_update_code = mod2.get_function(kernel_col_update)
+        mod2 = compiler.SourceModule(self.col_update_kernel_code)
+        col_update_code = mod2.get_function("kernel_col_update")
 
         col_update_code(
             iter, self.A_device,
@@ -365,11 +368,11 @@ def cudaSVD(N, P, D):
         # Compute rotation parameters: sine and cosine
         # for all (p, q), q>p
         cP = computeParams()
-        sin, cos = cP.compute_params(A, P, iter, iterBlock)
-
+        sin, cos = cP.compute_params(A, np.int32(P), np.int32(iter), iterBlock)
+        print(sin.dtype)
         # row update
         dU = dimUpdate()
-        X = dU.row_update(iter, A, P, sin, cos, iterBlock)
+        X = dU.row_update(np.int32(iter), A, P, sin, cos, iterBlock)
 
         # col update
         eigenvectors = dU.col_update(iter, A, X, P, sin, cos, iterBlock)
