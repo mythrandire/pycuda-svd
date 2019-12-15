@@ -149,8 +149,8 @@ class computeParams:
 
     def compute_params(self, A, P, iter, iterblock):
         self.A_gpu = gpuarray.to_gpu(A)
-        self.dev_sin = gpuarray.empty((P, P), np.float32)
-        self.dev_cos = gpuarray.empty((P, P), np.float32)
+        self.dev_sin = gpuarray.empty((P, P), np.double)
+        self.dev_cos = gpuarray.empty((P, P), np.double)
         self.iterBlock_device = gpuarray.to_gpu(iterblock)
         # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
         if (P % 2 == 0):
@@ -364,15 +364,17 @@ def cudaSVD(N, P, D):
     MULTIPLY_BLOCK_SIZE = 64
 
     iter = 0
+    cP = computeParams()
+    dU = dimUpdate()
+
     while(iter < P - 1):
         # Compute rotation parameters: sine and cosine
         # for all (p, q), q>p
-        cP = computeParams()
         sin, cos = cP.compute_params(A, np.int32(P), np.int32(iter), iterBlock)
         print(sin.dtype)
+
         # row update
-        dU = dimUpdate()
-        X = dU.row_update(np.int32(iter), A, P, sin, cos, iterBlock)
+        X = dU.row_update(np.int32(iter), A, P, np.double(sin), cos, iterBlock)
 
         # col update
         eigenvectors = dU.col_update(iter, A, X, P, sin, cos, iterBlock)
