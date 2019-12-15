@@ -124,6 +124,7 @@ class computeParams:
         self.compute_params_kernel_code = """
             __global__ void kernel_compute_params(double *device_A, int P, int iter, double *device_sine, double *device_cosine, int *device_IterBlockToElem) {
                 /*1 Block, P/2 threads: threadID t handles params for its alloted pair (for a particular device_iter)*/
+                # define EPSILON 1e-4
                 int localID = threadIdx.x;
                 int k, l;
                 double elem, y, d, r, c, s; //,t
@@ -148,8 +149,8 @@ class computeParams:
 
     def compute_params(self, A, P, iter, iterblock):
         self.A_gpu = gpuarray.to_gpu(A)
-        self.dev_sin = gpuarray.empty((P, P))
-        self.dev_cos = gpuarray.empty((P, P))
+        self.dev_sin = gpuarray.empty((P, P), np.float32)
+        self.dev_cos = gpuarray.empty((P, P), np.float32)
         self.iterBlock_device = gpuarray.to_gpu(iterblock)
 
         # self.iterBlock_device = gpuarray.empty((P-1)*P / 2 * 2), astype.int)
@@ -342,7 +343,6 @@ def cudaSVD(N, P, D):
     dev_chess(np.int32(P), iterBlock_device, block = (np.int(P-1), np.int(np.ceil(P/2)), 1),
               grid = (np.int(P-1), np.int(P-1),1))
     iterBlock = iterBlock_device.get()
-
     # cudaAsynccopy something
     D_T = t.transpose_parallel(D)
     ###########################################################################
@@ -364,14 +364,15 @@ def cudaSVD(N, P, D):
     while(iter < P - 1):
         # Compute rotation parameters: sine and cosine
         # for all (p, q), q>p
-        print('here!')
-        sin, cos = computeParams.compute_params(A, P, iter, iterBlock)
+        cP = computeParams()
+        sin, cos = cP.compute_params(A, P, iter, iterBlock)
 
         # row update
-        X = dimUpdate.row_update(iter, A, P, sin, cos, iterBlock)
+        dU = dimUpdate()
+        X = dU.row_update(iter, A, P, sin, cos, iterBlock)
 
         # col update
-        eigenvectors = dimUpdate.col_update(iter, A, X, P, sin, cos, iterBlock)
+        eigenvectors = dU.col_update(iter, A, X, P, sin, cos, iterBlock)
         iter += 1
 
     eigenvectors_T = t.transpose_parallel(eigenvectors)
