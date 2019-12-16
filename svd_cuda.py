@@ -66,6 +66,74 @@ class cuda_Transpose:
 class gpuMul:
     def __init__(self):
 
+        self.mul_kernel_code_aa = """
+        __global__ void optMul(float * a, int m, int n, float * b, float * c,) {
+
+            #define TILE_WIDTH 16
+            int Row = blockIdx.y * blockDim.y + threadIdx.y;
+            int Col = blockIdx.x * blockDim.x + threadIdx.x;
+
+            __shared__ float shared_A[TILE_WIDTH][TILE_WIDTH];
+            __shared__ float shared_B[TILE_WIDTH][TILE_WIDTH];
+
+            float Cval = 0;
+            int tileid;
+            int i;
+
+            for (tileid = 0; tileid < (n-1) / TILE_WIDTH + 1; tileid++) {
+                if(Row<m && tileid*TILE_WIDTH+ threadIdx.x<n)
+                    shared_A[threadIdx.y][threadIdx.x] = a[Row * n + tileid * TILE_WIDTH + threadIdx.x];
+                else
+                    shared_A[threadIdx.y][threadIdx.x] = 0;
+                if(Col<m && tileid*TILE_WIDTH+threadIdx.y < n)
+                    shared_B[threadIdx.y][threadIdx.x] = b[(tileid * TILE_WIDTH + threadIdx.y) * m + Col];
+                else
+                    shared_B[threadIdx.y][threadIdx.x] =0;
+
+
+                __syncthreads();
+                for (i=0; i < TILE_WIDTH; i++)
+                    Cval += shared_A[threadIdx.y][i] * shared_B[i][threadIdx.x];
+
+                __syncthreads();
+                }
+
+                if(Row< m && Col<m)
+                    c[Row * m + Col] = Cval;
+            }
+
+        """
+
+        self.mul_kernel_code_2 = """
+            __global__ void kernel_MatMul(double* A, int ARows, int ACols, double* B, int BRows, int BCols, double* C) {
+                # define TILE_DIM 16
+                __shared__ double As[TILE_DIM][TILE_DIM];
+                __shared__ double Bs[TILE_DIM][TILE_DIM];
+                double CValue = 0;
+                int Row = blockIdx.y*TILE_DIM + threadIdx.y;
+                int Col = blockIdx.x*TILE_DIM + threadIdx.x;
+                int CRows = ARows;
+                int CCols = BCols;
+                for (int k = 0; k < (TILE_DIM + ACols - 1)/TILE_DIM; k++) {
+
+                    if (k*TILE_DIM + threadIdx.x < ACols && Row < ARows) As[threadIdx.y][threadIdx.x] = A[Row*ACols + k*TILE_DIM + threadIdx.x];
+                    else As[threadIdx.y][threadIdx.x] = 0.0;
+
+                    if (k*TILE_DIM + threadIdx.y < BRows && Col < BCols)  Bs[threadIdx.y][threadIdx.x] = B[(k*TILE_DIM + threadIdx.y)*BCols + Col];
+                    else Bs[threadIdx.y][threadIdx.x] = 0.0;
+
+                    __syncthreads();
+
+                    for (int n = 0; n < TILE_DIM; ++n) CValue += As[threadIdx.y][n] * Bs[n][threadIdx.x];
+
+                    __syncthreads();
+
+                }
+                if (Row < CRows && Col < CCols) C[((blockIdx.y * blockDim.y + threadIdx.y)*CCols)+(blockIdx.x*blockDim.x)+threadIdx.x]=CValue;
+
+            }
+        """
+
         self.mul_kernel_code = """
             #define BLOCK_SIZE 16
             __global__ void kernel_MatMul(float *A, int rA, int cA, float *B, int rB, int cB, float *C) {
@@ -121,6 +189,15 @@ class gpuMul:
                 grid = (grid_x, grid_y, 1)
             )
 
+            """
+            dev_mul(
+                self.A_gpu, rA, cA,
+                self.B_gpu,
+                self.C_gpu,
+                block = (16, 16, 1),
+                grid = (grid_x, grid_y, 1)
+            )
+            """
             return self.C_gpu.get()
 
 # computeParams.compute_params
@@ -230,20 +307,11 @@ class dimUpdate:
                     params[1] = device_cosine[col_pair[0] * P + col_pair[1]];
                 }
                 __syncthreads(); //all "P" threads in the block are synchronized and have access to row_pair(k,l) and params
-                //CHECKPOINT: Can you reduce shared-memory bank conflicts here? Is this better than computing pair(p,q) all over again
                 int k = col_pair[0], l = col_pair[1];
                 float sin_ = params[0], cos_ = params[1];
                 /*Concurrent modifications to all row pairs(k,l) [different blocks]*/
                 /*Concurrent modifications to different-column elements of a row pair: ["P" threads of the block]*/
                 float new_eigen_k, new_eigen_l;
-                /* col-wise access (inefficient):*/
-                //device_A[localID * P + k] = device_X[k * P + localID] * cos_ - device_X[l * P + localID] * sin_;
-                //device_A[localID * P + l] = device_X[k * P + localID] * sin_ + device_X[l * P + localID] * cos_;
-                //new_eigen_k = device_eigenvectors[localID * P + k]*cos_ - device_eigenvectors[localID*P+l]*sin_;
-                //new_eigen_l = device_eigenvectors[localID * P+k]*sin_ + device_eigenvectors[localID*P+l]*cos_;
-                //device_eigenvectors[localID * P + k] = new_eigen_k;
-                //device_eigenvectors[localID * P+l] = new_eigen_l;
-                /*row-wise access (efficient):*/
                 int kp = k*P + localID, lp = l *P+localID;
                 device_A[kp] = device_X[kp] * cos_ - device_X[lp] * sin_;
                 __syncthreads();
@@ -272,9 +340,9 @@ class dimUpdate:
         mod1 = compiler.SourceModule(self.row_update_kernel_code)
         row_update_code = mod1.get_function("kernel_row_update")
         if (P % 2 == 0):
-            grid_size = P / 2
+            grid_size = np.int(P / 2)
         else:
-            grid_size = P / 2 + 1
+            grid_size = np.int(P / 2 + 1)
 
         row_update_code(
             itr, self.A_device,
@@ -294,9 +362,9 @@ class dimUpdate:
         self.iterBlock_device = gpuarray.to_gpu(iterBlock)
 
         if (P % 2 == 0):
-            grid_size = P / 2
+            grid_size = np.int(P / 2)
         else:
-            grid_size = P / 2 + 1
+            grid_size = np.int(P / 2 + 1)
 
         mod2 = compiler.SourceModule(self.col_update_kernel_code)
         col_update_code = mod2.get_function("kernel_col_update")
@@ -365,12 +433,8 @@ def cudaSVD(N, P, D):
     iterBlock = iterBlock_device.get()
     # cudaAsynccopy something
     D_T = t.transpose_parallel(D)
-    print("D",D)
-    print("DT",D_T)
     ###########################################################################
-
     A = g.MatMul(D_T, np.int32(P), np.int32(N), D, np.int32(N), np.int32(P))
-    print(A)
     eigenvectors = np.ones((P, P), np.float32)
     counter = 0
 
@@ -386,21 +450,20 @@ def cudaSVD(N, P, D):
     cP = computeParams()
     dU = dimUpdate(P)
     X = np.zeros((P,P), dtype = np.float32)
-    while(itr < P - 1):
-        # Compute rotation parameters: sine and cosine
-        # for all (p, q), q>p
-        sin, cos = cP.compute_params(A, np.int32(P), np.int32(itr), iterBlock)
-        print(sin,cos)
-        # row update
-        X = dU.row_update(np.int32(itr), np.float32(A), np.float32(X),
-                          np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
-        print("X",X)
+    while(counter < 30):
+        while(itr < P-1):
+            # Compute rotation parameters: sine and cosine
+            # for all (p, q), q>p
+            sin, cos = cP.compute_params(A, np.int32(P), np.int32(itr), iterBlock)
+            # row update
+            X = dU.row_update(np.int32(itr), np.float32(A), np.float32(X),
+                            np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
         # col update
-        eigenvectors = dU.col_update(np.int32(itr), np.float32(A), np.float32(X),
-                                     np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
-        print("Eigenvectors",eigenvectors)
-        itr += 1
-        print(itr)
+            eigenvectors = dU.col_update(np.int32(itr), np.float32(A), np.float32(X),
+                                        np.int32(P), np.float32(sin), np.float32(cos), iterBlock)
+            itr = itr + 1
+
+        counter = counter + 1
     eigenvectors_T = t.transpose_parallel(eigenvectors)
 
     eigenvalues = np.ones(P)
@@ -435,7 +498,9 @@ def cudaSVD(N, P, D):
 
     U_T = t.transpose_parallel(U)
     prod = g.MatMul(inv_SIGMA, np.int32(N), np.int32(P), U_T, np.int32(P), np.int32(P))
+    # V_T = inv_SIGMA * U_T * D_T
     V_T = g.MatMul(prod, np.int32(N), np.int32(P), D_T, np.int32(P), np.int32(N))
+    print(U)
 
     return SIGMA, U, V_T
 
@@ -443,22 +508,18 @@ def cudaSVD(N, P, D):
 if __name__ =='__main__':
 
     random.seed(1)
-    A = np.random.randint(0,9,(3,3)).astype(np.float32)
-    #initialize A
-    #A = np.array([[4,0],[3,-5]])
-    #A = A.astype(np.float32)
-
-    #calculate covaiance matrix of A for numpy verification
+    A = np.random.randint(0,9,(10, 10)).astype(np.float32)
     A1 = np.dot(A.T,A)
 
     #serial jacobi method for SVD
     s, u, vt = cudaSVD(A.shape[0],A.shape[1],A)
-    print(A.shape[1])
+
 
     #numpy verification
     s1,v1 = np.linalg.eig(A1)
 
     #print results
+
     print("Serial Eigenvalues: \n", s)
     print("Numpy Eigenvalues: \n",np.sqrt(s1))
     print("Serial Eigenvectors: \n", u)
