@@ -4,13 +4,13 @@ Created on Tue Dec  3 14:10:24 2019
 
 @author: Ananye
 """
-
+import time
 import numpy as np
 import random
+import matplotlib.pyplot as plt
 from Helper import s_maxind, s_update, s_rotate            
 
 def svd_pca_serial(N, P, D):
-                   #, U, sigma, VT, sigmam, sigman, dhat, k, retention):
     MAX_ITER = 1000000
     state = P
     num_iter = 0
@@ -30,13 +30,14 @@ def svd_pca_serial(N, P, D):
     
     #setting ind to index of maximum value in each column and setting 
     #eigenvalues to diagonal elements of covariance matrix
-    for i in range(P):
+    for i in range(P):  
         ind[i] = s_maxind(As,P,i)
         e[i] = As[i][i]
         changed[i] = True
-    
+    t0 = time.time()
     #start iteration of jaboi method
-    while (state>=0 and num_iter<MAX_ITER):
+    
+    while (state>0 and num_iter<MAX_ITER):
         m=0
         #find index of maximum element in each column
         for i in range(1,P-1):
@@ -60,8 +61,7 @@ def svd_pca_serial(N, P, D):
         
         #update state of eigenvalues if their values have been changed
         changed1, state1 = s_update(k, -t, e, changed, state)
-        changed, state = s_update(l, t, e, changed1, state1)
-        
+        changed, state= s_update(l, t, e, changed1, state1)
         #rotate covariance matrix on offdiagonal elements to reduce it to 
         #eigenvalue matrix
         for i in range(0,k):
@@ -109,31 +109,40 @@ def svd_pca_serial(N, P, D):
     UT = U.T
     prod = np.dot(inv_sigma,UT)
     VT = np.dot(prod, DT)
-    
+    t1 = time.time()
     #return calculated eigenvalue and eigenvector matrices
-    return sigma, U, VT
+    return sigma, U, VT, t1-t0
 
 if __name__ =='__main__':
     random.seed(1)
-    A = np.random.randint(0,9,(3,3)).astype(np.float32)
+    t = []
+    for i in range(1,15):
+        A = np.random.randint(0,9,(2*i,2*i)).astype(np.float32)
     #initialize A
     #A = np.array([[4,0],[3,-5]])
     #A = A.astype(np.float32)
     
     #calculate covaiance matrix of A for numpy verification
-    A1 = np.dot(A.T,A)
+        A1 = np.dot(A.T,A)
     
     #serial jacobi method for SVD
-    s, u, vt = svd_pca_serial(A.shape[0],A.shape[1],A)
-    
+        s, u, vt, tt = svd_pca_serial(A.shape[0],A.shape[1],A)
+        t.append(tt)
     #numpy verification
-    s1,v1 = np.linalg.eig(A1)
+        s1,v1 = np.linalg.eig(A1)
     
     #print results
-    print("Serial Eigenvalues: \n", s)
-    print("Numpy Eigenvalues: \n",np.sqrt(s1))
-    print("Serial Eigenvectors: \n", u)
-    print("Numpy Eigenvectors: \n", v1)
+        print("Serial Eigenvalues: \n", s)
+        print("Numpy Eigenvalues: \n",np.sqrt(s1))
+        print("Serial Eigenvectors: \n", u)
+        print("Numpy Eigenvectors: \n", v1)
+    #print timing results
+    print("Time taken serially: \n")
+    plt.plot(range(1,15),t, label = 'Serial Training Time')
+    plt.xlabel("Iteration of input array (x2)")
+    plt.ylabel("Running time(s)")
+    plt.legend()
+    plt.savefig('final.png')  
     
     
             
