@@ -9,14 +9,14 @@ Serial code: serial.py
 
 Serial code requires Helper.py function. Please store both files in same directory while running.
 
-Parallel code was tested on Nvidia GeForce RTX2070 and Nvidia GeForce Tesseract.
+Parallel code was tested on Nvidia GeForce RTX2070 and Nvidia GeForce Titan X (Tesseract server).
 
 ## Conclusion
 One of the major issues of efficient implementation of CUDA code is efficient device memory management. The total amount of memory on the GPU device is limited and hence it is not uncommon to run into memory errors for larger data matrices.
 
 Although our code works for data matrices upto size 17, we can further strive to improve the memory efficiency by introducing memory pooling or deallocating memory more regularly while interfacing with pycuda.
 
-A parallel implementation of Jacobi SVD algorithm was thus implemented by us. 
+We therefore attempted a parallel implementation of Jacobi SVD algorithm. 
 
 ### Contributors
 Ananye Pandey (ap3885@columbia.edu) UNI: ap3885
